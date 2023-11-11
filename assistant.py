@@ -6,10 +6,25 @@ from pydub.playback import play
 import subprocess
 import tempfile
 import asyncio
+import os
+
+BEEP = AudioSegment.from_file("audio/beep.mp3", format="mp3")
+BELL = AudioSegment.from_file("audio/bell.mp3", format="mp3")
+ERROR = AudioSegment.from_file("audio/error.mp3", format="mp3")
+DEAFEN = -30
 
 # Replace with your OpenAI API key
-api_key = "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"
+api_key = os.environ.get("OPENAI_API_KEY")
 client = AsyncOpenAI(api_key=api_key)
+
+
+def lower_audio(audio):
+    loudness = audio.dBFS
+    adjustment_factor = DEAFEN - loudness
+    return audio + adjustment_factor
+
+
+ERROR = lower_audio(ERROR)
 
 
 # Asynchronous function to generate a response from ChatGPT
@@ -72,30 +87,37 @@ async def gpt_speech(text):
     play(audio_segment)
 
 
+async def listening():
+    play(BEEP)
+    print("Listening for a command...")
+    with sr.Microphone() as source:
+        r.adjust_for_ambient_noise(source)
+        audio = r.listen(source)
+    try:
+        command = r.recognize_google(audio).lower()
+        print(f"You said: {command}")
+
+        # Send the command to ChatGPT for processing
+        text_response = await generate_response(command)
+        print(f"ChatGPT: {text_response}")
+
+        # Convert the response to speech and play it
+        play(BELL)
+        await gpt_speech(text_response)
+
+    except sr.UnknownValueError:
+        await gpt_speech("Sorry, I didn't catch that. Please repeat.")
+        await listening()
+    except sr.RequestError:
+        await gpt_speech("Sorry, I'm having trouble processing your request.")
+
+
 # Main loop
 async def main():
     commands = {"stop": False}
     while True:
         if listen_for_commands(commands):
-            print("Listening for a command...")
-            with sr.Microphone() as source:
-                r.adjust_for_ambient_noise(source)
-                audio = r.listen(source)
-            try:
-                command = r.recognize_google(audio).lower()
-                print(f"You said: {command}")
-
-                # Send the command to ChatGPT for processing
-                text_response = await generate_response(command)
-                print(f"ChatGPT: {text_response}")
-
-                # Convert the response to speech and play it
-                await gpt_speech(text_response)
-
-            except sr.UnknownValueError:
-                await gpt_speech("Sorry, I didn't catch that. Please repeat.")
-            except sr.RequestError:
-                await gpt_speech("Sorry, I'm having trouble processing your request.")
+            await listening()
 
         # Exit the program when "stop" is said
         if commands["stop"]:
