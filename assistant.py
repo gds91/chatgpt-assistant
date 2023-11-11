@@ -39,14 +39,6 @@ async def generate_response(prompt):
     return response.choices[0].message.content.strip()
 
 
-# Function to convert text to speech using gTTS
-def speak(text):
-    tts = gTTS(text=text, lang="en")
-    with tempfile.NamedTemporaryFile(delete=True) as fp:
-        tts.save(fp.name)
-        subprocess.run(["mpg123", fp.name])  # Requires 'mpg123' to be installed
-
-
 # Initialize the recognizer
 r = sr.Recognizer()
 
