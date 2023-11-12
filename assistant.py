@@ -4,26 +4,42 @@ from pydub import AudioSegment
 from pydub.playback import play
 import tempfile
 import asyncio
+import pvporcupine
+import pyaudio
 import os
 import config
 import azure.cognitiveservices.speech as speechsdk
+import numpy as np
+
+# audio constants
+SAMPLE_RATE = 16000
+FRAME_LENGTH = (
+    512  # This value might need to be adjusted based on Porcupine's requirements
+)
+FORMAT = pyaudio.paInt16
+CHANNELS = 1
+
+# porcupine keywords
+PORCUPINE_KEYWORDS = [
+    "keywords/Exit_en_windows_v3_0_0.ppn",
+    "keywords/Ok-Chat_en_windows_v3_0_0.ppn",
+]
 
 BEEP = AudioSegment.from_file("audio/beep.mp3", format="mp3")
 BELL = AudioSegment.from_file("audio/bell.mp3", format="mp3")
 ERROR = AudioSegment.from_file("audio/error.mp3", format="mp3")
 
-# OpenAI API key
+# OpenAI API Key
 api_key = os.environ.get("OPENAI_API_KEY", config.OPENAI_API_KEY)
 client = AsyncOpenAI(api_key=api_key)
 
 # Define Azure speech config
-azure_api_key = os.environ.get(
-    "AZURE_API_KEY", config.AZURE_API_KEY
-)  # config.azure_api_key
-azure_region = os.environ.get(
-    "AZURE_REGION", config.AZURE_REGION
-)  # config.azure_region
+azure_api_key = os.environ.get("AZURE_API_KEY", config.AZURE_API_KEY)
+azure_region = os.environ.get("AZURE_REGION", config.AZURE_REGION)
 speech_config = speechsdk.SpeechConfig(subscription=azure_api_key, region=azure_region)
+
+# Picovoice API Key
+picovoice_key = os.environ.get("PICOVOICE_API_KEY", config.PICOVOICE_API_KEY)
 
 
 def lower_audio(audio, deafen):
@@ -33,7 +49,7 @@ def lower_audio(audio, deafen):
 
 
 ERROR = lower_audio(ERROR, -30)
-BELL = lower_audio(BELL, -25)
+BELL = lower_audio(BELL, -30)
 
 
 # Asynchronous function to generate a response from ChatGPT
@@ -48,28 +64,41 @@ async def generate_response(prompt):
     return response.choices[0].message.content.strip()
 
 
-# Initialize the recognizer
-r = sr.Recognizer()
+# Initialize Porcupine
+porcupine = pvporcupine.create(
+    access_key=picovoice_key, keyword_paths=PORCUPINE_KEYWORDS
+)
+
+# Initialize PyAudio and open an audio stream
+pa = pyaudio.PyAudio()
+audio_stream = pa.open(
+    format=FORMAT,
+    channels=CHANNELS,
+    rate=SAMPLE_RATE,
+    input=True,
+    frames_per_buffer=FRAME_LENGTH,
+)
 
 
-# Function to listen for the wake word
+def get_next_audio_frame():
+    """Capture and return the next audio frame."""
+    frame = audio_stream.read(FRAME_LENGTH)
+    return np.frombuffer(frame, dtype=np.int16)
+
+
 def listen_for_commands(commands):
-    with sr.Microphone(device_index=1) as source:
-        print("Listening for 'OK Chat'...")
-        r.adjust_for_ambient_noise(source, duration=0.5)
-        audio = r.listen(source)
-    try:
-        command = r.recognize_google(audio).lower()
-        if "ok chat" in command:
+    print("Listening for commands...")
+    while True:
+        audio_frame = get_next_audio_frame()
+        keyword_index = porcupine.process(audio_frame)
+
+        if keyword_index == 1:  # "Ok-Chat"
+            print("Ok-Chat detected, proceeding to listen.")
             return True
-        elif "stop" in command:
-            print("received stop")
+        elif keyword_index == 0:  # "Exit"
+            print("Exit command detected, stopping.")
             commands["stop"] = True
-    except sr.UnknownValueError:
-        print("Could not understand audio")
-    except sr.RequestError as e:
-        print(f"Could not request results; {e}")
-    return False
+            return False
 
 
 # Function to play the text response
@@ -85,6 +114,11 @@ async def gpt_speech(text):
 
     # Load the audio from the saved file and play it
     audio_segment = AudioSegment.from_mp3(temp_file_path)
+
+    # Add a short period of silence at the beginning
+    silence = AudioSegment.silent(duration=500)  # 500 ms of silence
+    audio_segment = silence + audio_segment
+
     play(audio_segment)
 
 
@@ -99,26 +133,29 @@ def transcribe_audio(speech_config):
 
 
 async def listening():
-    play(BEEP)
-    print("Listening for a prompt...")
-    input_text = transcribe_audio(speech_config)
     try:
-        command = input_text.lower()
-        print(f"You said: {command}")
+        play(BEEP)
+        print("Listening for a prompt...")
 
-        # Send the command to ChatGPT for processing
-        text_response = await generate_response(command)
+        # Apply the timeout only to the user's speech input part
+        input_text = await asyncio.wait_for(
+            asyncio.to_thread(transcribe_audio, speech_config), timeout=5.0
+        )
+
+        print(f"You said: {input_text}")
+
+        # The server response part is outside the timeout block
+        text_response = await generate_response(input_text)
         print(f"ChatGPT: {text_response}")
 
-        # Convert the response to speech and play it
         play(BELL)
         await gpt_speech(text_response)
 
-    except sr.UnknownValueError:
-        await gpt_speech("Sorry, I didn't catch that. Please repeat.")
-        await listening()
-    except sr.RequestError:
-        await gpt_speech("Sorry, I'm having trouble processing your request.")
+    except asyncio.TimeoutError:
+        await gpt_speech("Listening timed out. Please try again.")
+        # Optionally, call listening() again or handle the timeout situation
+    except Exception as e:
+        await gpt_speech(f"An error occurred: {e}")
 
 
 # Main loop
@@ -136,3 +173,5 @@ async def main():
 
 
 asyncio.run(main())
+audio_stream.close()
+pa.terminate()
