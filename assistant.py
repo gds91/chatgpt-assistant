@@ -1,5 +1,4 @@
 from openai import AsyncOpenAI
-import speech_recognition as sr
 from pydub import AudioSegment
 from pydub.playback import play
 import tempfile
@@ -10,6 +9,8 @@ import os
 import config
 import azure.cognitiveservices.speech as speechsdk
 import numpy as np
+import signal
+import atexit
 
 # audio constants
 SAMPLE_RATE = 16000
@@ -25,10 +26,6 @@ PORCUPINE_KEYWORDS = [
     "keywords/Ok-Chat_en_windows_v3_0_0.ppn",
 ]
 
-BEEP = AudioSegment.from_file("audio/beep.mp3", format="mp3")
-BELL = AudioSegment.from_file("audio/bell.mp3", format="mp3")
-ERROR = AudioSegment.from_file("audio/error.mp3", format="mp3")
-
 # OpenAI API Key
 api_key = os.environ.get("OPENAI_API_KEY", config.OPENAI_API_KEY)
 client = AsyncOpenAI(api_key=api_key)
@@ -41,15 +38,22 @@ speech_config = speechsdk.SpeechConfig(subscription=azure_api_key, region=azure_
 # Picovoice API Key
 picovoice_key = os.environ.get("PICOVOICE_API_KEY", config.PICOVOICE_API_KEY)
 
+BEEP = AudioSegment.from_file("audio/beep.mp3", format="mp3")
+BELL = AudioSegment.from_file("audio/bell.mp3", format="mp3")
+ERROR = AudioSegment.from_file("audio/error.mp3", format="mp3")
 
-def lower_audio(audio, deafen):
+
+def lower_audio(audio, lower):
     loudness = audio.dBFS
-    adjustment_factor = deafen - loudness
+    adjustment_factor = lower - loudness
     return audio + adjustment_factor
 
 
 ERROR = lower_audio(ERROR, -30)
 BELL = lower_audio(BELL, -30)
+
+# Global variables
+temp_files_to_clean_up = []
 
 
 # Asynchronous function to generate a response from ChatGPT
@@ -107,29 +111,44 @@ async def gpt_speech(text):
         model="tts-1", voice="nova", input=text
     )
 
-    # Save the binary content to a temporary file
-    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as temp_file:
-        temp_file.write(audio_response.content)
-        temp_file_path = temp_file.name
+    # Create a temporary file to save the synthesized speech
+    fd, temp_file_path = tempfile.mkstemp(suffix=".mp3")
+    os.close(fd)  # We don't need the file descriptor, just the path
 
-    # Load the audio from the saved file and play it
-    audio_segment = AudioSegment.from_mp3(temp_file_path)
+    temp_files_to_clean_up.append(temp_file_path)
+    # Register the cleanup function specifically for this file
+    atexit.register(cleanup_temp_file, temp_file_path)
 
-    # Add a short period of silence at the beginning
-    silence = AudioSegment.silent(duration=500)  # 500 ms of silence
-    audio_segment = silence + audio_segment
+    try:
+        # Write the API response content to the temporary file
+        with open(temp_file_path, "wb") as temp_file:
+            temp_file.write(audio_response.content)
 
-    play(audio_segment)
+        # Play the audio from the temporary file
+        audio_segment = AudioSegment.from_mp3(temp_file_path)
+        silence = AudioSegment.silent(duration=500)  # 500 ms of silence
+        audio_segment = silence + audio_segment
+        play(audio_segment)
+
+    except Exception as e:
+        print(f"An error occurred in gpt_speech: {e}")
+        # Handle the error accordingly
 
 
-def transcribe_audio(speech_config):
-    audio_config = speechsdk.AudioConfig(use_default_microphone=True)
-    speech_recognizer = speechsdk.SpeechRecognizer(
-        speech_config=speech_config, audio_config=audio_config
-    )
+async def transcribe_audio():
+    try:
+        audio_config = speechsdk.AudioConfig(use_default_microphone=True)
+        speech_recognizer = speechsdk.SpeechRecognizer(
+            speech_config=speech_config, audio_config=audio_config
+        )
 
-    result = speech_recognizer.recognize_once_async().get()
-    return result.text.strip()
+        result = speech_recognizer.recognize_once_async().get()
+        return result.text.strip()
+
+    except Exception as e:
+        print(f"An error occurred in transcribe_audio: {e}")
+        # Handle the error or return a default value
+        return "Error in transcription."
 
 
 async def listening():
@@ -138,9 +157,7 @@ async def listening():
         print("Listening for a prompt...")
 
         # Apply the timeout only to the user's speech input part
-        input_text = await asyncio.wait_for(
-            asyncio.to_thread(transcribe_audio, speech_config), timeout=5.0
-        )
+        input_text = await asyncio.wait_for(transcribe_audio(), timeout=30.0)
 
         print(f"You said: {input_text}")
 
@@ -155,23 +172,62 @@ async def listening():
         await gpt_speech("Listening timed out. Please try again.")
         # Optionally, call listening() again or handle the timeout situation
     except Exception as e:
+        print(e)
         await gpt_speech(f"An error occurred: {e}")
+
+
+def sigint_handler(signum, frame):
+    print("SIGINT received, cleaning up resources...")
+    cleanup_temp_files()  # Clean up temporary files
+    cleanup_resources()  # Clean up other resources like audio streams
+    print("Cleanup completed. Exiting.")
+    os._exit(0)
+
+
+def cleanup_resources():
+    # Close the audio stream and PyAudio instance
+    if audio_stream is not None:
+        audio_stream.close()
+    if pa is not None:
+        pa.terminate()
+
+
+def cleanup_temp_files():
+    while temp_files_to_clean_up:
+        file_path = temp_files_to_clean_up.pop()
+        cleanup_temp_file(file_path)
+
+
+def cleanup_temp_file(path):
+    try:
+        os.remove(path)
+    except Exception as e:
+        print(f"Error removing temporary file: {e}")
 
 
 # Main loop
 async def main():
     commands = {"stop": False}
-    while True:
-        if listen_for_commands(commands):
-            await listening()
+    try:
+        while True:
+            if listen_for_commands(commands):
+                await listening()
 
-        # Exit the program when "stop" is said
-        if commands["stop"]:
-            break
+            # Exit the program when "stop" is said
+            if commands["stop"]:
+                break
 
-        await asyncio.sleep(0.1)  # To prevent high CPU usage
+            await asyncio.sleep(0.1)  # To prevent high CPU usage
+    except Exception as e:
+        print(f"An error occurred: {e}")
+    finally:
+        # Cleanup before exiting normally
+        cleanup_resources()
 
 
-asyncio.run(main())
-audio_stream.close()
-pa.terminate()
+# Register the SIGINT handler
+signal.signal(signal.SIGINT, sigint_handler)
+
+# Main program execution
+if __name__ == "__main__":
+    asyncio.run(main())
