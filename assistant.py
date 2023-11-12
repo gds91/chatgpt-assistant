@@ -1,30 +1,34 @@
 from openai import AsyncOpenAI
-from gtts import gTTS
 import speech_recognition as sr
 from pydub import AudioSegment
 from pydub.playback import play
-import subprocess
 import tempfile
 import asyncio
 import os
+import azure.cognitiveservices.speech as speechsdk
 
 BEEP = AudioSegment.from_file("audio/beep.mp3", format="mp3")
 BELL = AudioSegment.from_file("audio/bell.mp3", format="mp3")
 ERROR = AudioSegment.from_file("audio/error.mp3", format="mp3")
-DEAFEN = -30
 
-# Replace with your OpenAI API key
+# OpenAI API key
 api_key = os.environ.get("OPENAI_API_KEY")
 client = AsyncOpenAI(api_key=api_key)
 
+# Define Azure speech config
+azure_api_key = "e010556b5b6a4e5ab31e17f35dcd5588"  # config.azure_api_key
+azure_region = "southeastasia"  # config.azure_region
+speech_config = speechsdk.SpeechConfig(subscription=azure_api_key, region=azure_region)
 
-def lower_audio(audio):
+
+def lower_audio(audio, deafen):
     loudness = audio.dBFS
-    adjustment_factor = DEAFEN - loudness
+    adjustment_factor = deafen - loudness
     return audio + adjustment_factor
 
 
-ERROR = lower_audio(ERROR)
+ERROR = lower_audio(30)
+BELL = lower_audio(10)
 
 
 # Asynchronous function to generate a response from ChatGPT
@@ -79,14 +83,22 @@ async def gpt_speech(text):
     play(audio_segment)
 
 
+def transcribe_audio(speech_config):
+    audio_config = speechsdk.AudioConfig(use_default_microphone=True)
+    speech_recognizer = speechsdk.SpeechRecognizer(
+        speech_config=speech_config, audio_config=audio_config
+    )
+
+    result = speech_recognizer.recognize_once_async().get()
+    return result.text.strip()
+
+
 async def listening():
     play(BEEP)
     print("Listening for a command...")
-    with sr.Microphone() as source:
-        r.adjust_for_ambient_noise(source)
-        audio = r.listen(source)
+    input_text = transcribe_audio(speech_config)
     try:
-        command = r.recognize_google(audio).lower()
+        command = input_text.lower()
         print(f"You said: {command}")
 
         # Send the command to ChatGPT for processing
