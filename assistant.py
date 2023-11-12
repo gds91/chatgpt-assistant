@@ -5,6 +5,7 @@ from pydub.playback import play
 import tempfile
 import asyncio
 import os
+import config
 import azure.cognitiveservices.speech as speechsdk
 
 BEEP = AudioSegment.from_file("audio/beep.mp3", format="mp3")
@@ -12,12 +13,16 @@ BELL = AudioSegment.from_file("audio/bell.mp3", format="mp3")
 ERROR = AudioSegment.from_file("audio/error.mp3", format="mp3")
 
 # OpenAI API key
-api_key = os.environ.get("OPENAI_API_KEY")
+api_key = os.environ.get("OPENAI_API_KEY", config.OPENAI_API_KEY)
 client = AsyncOpenAI(api_key=api_key)
 
 # Define Azure speech config
-azure_api_key = "e010556b5b6a4e5ab31e17f35dcd5588"  # config.azure_api_key
-azure_region = "southeastasia"  # config.azure_region
+azure_api_key = os.environ.get(
+    "AZURE_API_KEY", config.AZURE_API_KEY
+)  # config.azure_api_key
+azure_region = os.environ.get(
+    "AZURE_REGION", config.AZURE_REGION
+)  # config.azure_region
 speech_config = speechsdk.SpeechConfig(subscription=azure_api_key, region=azure_region)
 
 
@@ -51,7 +56,7 @@ r = sr.Recognizer()
 def listen_for_commands(commands):
     with sr.Microphone(device_index=1) as source:
         print("Listening for 'OK Chat'...")
-        r.adjust_for_ambient_noise(source)
+        r.adjust_for_ambient_noise(source, duration=0.5)
         audio = r.listen(source)
     try:
         command = r.recognize_google(audio).lower()
@@ -95,7 +100,7 @@ def transcribe_audio(speech_config):
 
 async def listening():
     play(BEEP)
-    print("Listening for a command...")
+    print("Listening for a prompt...")
     input_text = transcribe_audio(speech_config)
     try:
         command = input_text.lower()
@@ -118,7 +123,6 @@ async def listening():
 
 # Main loop
 async def main():
-    play(BELL)
     commands = {"stop": False}
     while True:
         if listen_for_commands(commands):
